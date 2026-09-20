@@ -9,6 +9,7 @@ CONFIG_FILE="${RDP_SCREEN_PRIVACY_CONFIG:-/etc/rdp-screen-privacy.conf}"
 RUNTIME_DIR="/run/rdp-screen-privacy"
 BUS_CACHE_FILE="${RUNTIME_DIR}/buses"
 PORT_CACHE_FILE="${RUNTIME_DIR}/port"
+STATE_FILE="${RUNTIME_DIR}/state"
 
 # Defaults. Every value can be overridden in /etc/rdp-screen-privacy.conf.
 DESKTOP_USER=""
@@ -68,6 +69,10 @@ require_command() {
 ensure_runtime_dir() {
     mkdir -p "$RUNTIME_DIR"
     chmod 0755 "$RUNTIME_DIR" 2>/dev/null || true
+}
+
+write_state() {
+    printf '%s\n' "$1" >"$STATE_FILE" 2>/dev/null || true
 }
 
 resolve_desktop_user() {
@@ -373,6 +378,7 @@ run_daemon() {
     trap 'cleanup; exit 0' SIGTERM SIGINT
 
     log "$PROGRAM started"
+    write_state "disconnected"
     if [[ -n "$CURRENT_PORT" ]]; then
         log "watching Desktop Sharing TCP port $CURRENT_PORT"
     else
@@ -386,6 +392,7 @@ run_daemon() {
                 log "RDP connection detected on port $CURRENT_PORT"
                 screen_off
                 LAST_STATE="connected"
+                write_state "connected"
             elif (( KEEP_OFF_INTERVAL > 0 )); then
                 now="$(date +%s)"
                 if (( now - LAST_KEEP_OFF >= KEEP_OFF_INTERVAL )); then
@@ -407,6 +414,7 @@ run_daemon() {
                     log "disconnect confirmed"
                     secure_disconnect
                     LAST_STATE="disconnected"
+                    write_state "disconnected"
                 fi
             fi
         fi

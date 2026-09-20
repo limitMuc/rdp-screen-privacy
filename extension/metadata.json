@@ -1,0 +1,8 @@
+{
+  "uuid": "rdp-screen-privacy@limitMuc",
+  "name": "RDP Screen Privacy",
+  "description": "Show the privacy state of the rdp-screen-privacy service.",
+  "shell-version": ["45", "46", "47", "48", "49", "50"],
+  "url": "https://github.com/limitMuc/rdp-screen-privacy",
+  "session-modes": ["user"]
+}

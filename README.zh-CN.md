@@ -57,6 +57,7 @@ RDP 连接断开
 - 确认断开后，**先锁屏，再亮物理屏**。
 - 可选周期性补发关屏指令，处理长时间远程过程中偶发自动亮屏。
 - 自带 systemd 服务、安装/卸载脚本、诊断工具和预检查脚本。
+- `extension/` 提供可选的 GNOME Shell 扩展，用于在顶栏显示服务状态。
 - 不会自动修改防火墙，不会创建 RDP 账号或密码。
 
 ## 参考环境
@@ -114,6 +115,21 @@ GNOME 默认 remote-assistance 行为在锁屏后会停止远程访问，因此�
 
 ## 快速安装
 
+完整的换机交接、实机测试、故障排查和发布清单请见
+[HANDOFF.md](HANDOFF.md)。
+
+可选的 GNOME 顶栏扩展与后台服务分开安装：
+
+```bash
+make extension-pack
+systemctl --user daemon-reload
+systemctl --user enable --now rdp-screen-privacy-agent.service
+gnome-extensions install rdp-screen-privacy@limitMuc.shell-extension.zip
+gnome-extensions enable rdp-screen-privacy@limitMuc
+```
+
+扩展元数据已经指向 `limitMuc/rdp-screen-privacy` 仓库。
+
 ### 1. 确认显示器开启 DDC/CI
 
 不少显示器需要在 OSD 菜单里手工打开 DDC/CI。
@@ -160,7 +176,7 @@ sudo ddcutil --bus 8 setvcp D6 01
 ### 5. 安装
 
 ```bash
-git clone https://github.com/YOUR_GITHUB_USER/rdp-screen-privacy.git
+git clone https://github.com/limitMuc/rdp-screen-privacy.git
 cd rdp-screen-privacy
 sudo ./install.sh --install-deps --user "$USER"
 ```

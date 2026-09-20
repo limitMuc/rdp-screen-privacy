@@ -20,6 +20,8 @@ fi
 systemctl disable --now rdp-screen-privacy.service 2>/dev/null || true
 rm -f /etc/systemd/system/rdp-screen-privacy.service
 rm -f /usr/local/sbin/rdp-screen-privacy
+rm -f /usr/local/libexec/rdp-screen-privacy-agent
+rm -f /usr/local/lib/systemd/user/rdp-screen-privacy-agent.service
 rm -rf /run/rdp-screen-privacy
 
 if [[ "$PURGE_CONFIG" == true ]]; then

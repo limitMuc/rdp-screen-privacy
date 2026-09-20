@@ -57,6 +57,7 @@ The daemon does **not** disable GNOME displays or change the logical display lay
 - Locks the GNOME session **before** turning monitors back on after a confirmed disconnect.
 - Optional periodic OFF enforcement for displays that wake during long sessions.
 - Provides systemd service, installer, uninstaller, diagnostics and preflight checks.
+- Includes an optional GNOME Shell extension under `extension/` for showing service state in the panel.
 - Does not open firewall ports or configure RDP credentials.
 
 ## Reference environment
@@ -112,6 +113,21 @@ GNOME's normal remote-assistance behavior closes remote access when the screen i
 
 ## Quick start
 
+For the complete handoff, real-machine test plan and release checklist, see
+[HANDOFF.md](HANDOFF.md).
+
+The optional GNOME panel extension is packaged separately from the backend:
+
+```bash
+make extension-pack
+systemctl --user daemon-reload
+systemctl --user enable --now rdp-screen-privacy-agent.service
+gnome-extensions install rdp-screen-privacy@limitMuc.shell-extension.zip
+gnome-extensions enable rdp-screen-privacy@limitMuc
+```
+
+The extension metadata points to the `limitMuc/rdp-screen-privacy` repository.
+
 ### 1. Enable DDC/CI in monitor settings
 
 Many external monitors have a DDC/CI toggle in their on-screen menu. Enable it first.
@@ -160,7 +176,7 @@ Do this for every display before installing the daemon.
 Ubuntu / Debian example:
 
 ```bash
-git clone https://github.com/YOUR_GITHUB_USER/rdp-screen-privacy.git
+git clone https://github.com/limitMuc/rdp-screen-privacy.git
 cd rdp-screen-privacy
 sudo ./install.sh --install-deps --user "$USER"
 ```

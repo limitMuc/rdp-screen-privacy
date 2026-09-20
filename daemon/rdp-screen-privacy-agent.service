@@ -1,0 +1,11 @@
+[Unit]
+Description=RDP Screen Privacy user D-Bus agent
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/libexec/rdp-screen-privacy-agent
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

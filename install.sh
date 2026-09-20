@@ -73,6 +73,8 @@ install_deps
 
 install -Dm0755 "$ROOT_DIR/src/rdp-screen-privacy" /usr/local/sbin/rdp-screen-privacy
 install -Dm0644 "$ROOT_DIR/systemd/rdp-screen-privacy.service" /etc/systemd/system/rdp-screen-privacy.service
+install -Dm0755 "$ROOT_DIR/daemon/rdp-screen-privacy-agent.js" /usr/local/libexec/rdp-screen-privacy-agent
+install -Dm0644 "$ROOT_DIR/daemon/rdp-screen-privacy-agent.service" /usr/local/lib/systemd/user/rdp-screen-privacy-agent.service
 
 if [[ ! -e /etc/rdp-screen-privacy.conf ]]; then
     install -Dm0644 "$ROOT_DIR/config/rdp-screen-privacy.conf.example" /etc/rdp-screen-privacy.conf
@@ -106,4 +108,9 @@ Recommended next steps:
 
 If auto-detection is unsuitable, edit:
   sudo editor /etc/rdp-screen-privacy.conf
+
+The optional GNOME panel extension uses a user service. Enable it as the
+desktop user with:
+  systemctl --user daemon-reload
+  systemctl --user enable --now rdp-screen-privacy-agent.service
 EOF_DONE
