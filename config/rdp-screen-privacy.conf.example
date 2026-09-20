@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: MIT
+# /etc/rdp-screen-privacy.conf
+
+# GNOME desktop user whose existing Desktop Sharing session should be watched.
+# Leave empty to auto-detect the active graphical user on seat0.
+DESKTOP_USER=""
+
+# Desktop Sharing RDP port.
+# "auto" discovers the port from the user-level gnome-remote-desktop daemon.
+# This is useful when GNOME Remote Login occupies 3389 and Desktop Sharing
+# negotiates to 3390.
+RDP_PORT="auto"
+
+# Space-separated ddcutil I2C bus numbers, for example: "8 13".
+# "auto" discovers all DDC/CI displays and caches their bus numbers in /run.
+# Explicit buses are useful on systems with unrelated DDC devices.
+MONITOR_BUSES="auto"
+
+# Polling and disconnect debounce, in seconds.
+CHECK_INTERVAL=1
+DISCONNECT_DELAY=5
+LOCK_SETTLE_DELAY=2
+
+# Re-send DDC power commands because some displays wake during RDP/GNOME
+# display negotiation. Values are cumulative sleep delays between attempts.
+OFF_RETRY_DELAYS="0 2 3"
+ON_RETRY_DELAYS="0 2"
+
+# Reassert OFF while RDP remains connected. 0 disables periodic enforcement.
+# Set e.g. 30 if a monitor occasionally wakes later during a long session.
+KEEP_OFF_INTERVAL=0
+
+# MCCS VCP D6 power mode values. 01=On. 04 is commonly DPM Off.
+# Some displays expose 05 as a write-only hard-off value; 04 is intentionally
+# the safer default because many monitors remain remotely wakeable with 04.
+DDC_OFF_VALUE="04"
+DDC_ON_VALUE="01"
+
+# Privacy/safety behavior on disconnect.
+LOCK_ON_DISCONNECT=true
+TURN_ON_AFTER_DISCONNECT=true
+
+# Fail-safe behavior when the service is explicitly stopped/restarted.
+LOCK_ON_SERVICE_STOP=true
+TURN_ON_ON_SERVICE_STOP=true
+
+# When RDP_PORT=auto, re-check the user daemon's listener periodically.
+PORT_REFRESH_INTERVAL=10

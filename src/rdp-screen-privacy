@@ -1,0 +1,539 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+
+set -uo pipefail
+
+PROGRAM="rdp-screen-privacy"
+VERSION="0.1.0"
+CONFIG_FILE="${RDP_SCREEN_PRIVACY_CONFIG:-/etc/rdp-screen-privacy.conf}"
+RUNTIME_DIR="/run/rdp-screen-privacy"
+BUS_CACHE_FILE="${RUNTIME_DIR}/buses"
+PORT_CACHE_FILE="${RUNTIME_DIR}/port"
+
+# Defaults. Every value can be overridden in /etc/rdp-screen-privacy.conf.
+DESKTOP_USER=""
+RDP_PORT="auto"
+MONITOR_BUSES="auto"
+CHECK_INTERVAL=1
+DISCONNECT_DELAY=5
+LOCK_SETTLE_DELAY=2
+OFF_RETRY_DELAYS="0 2 3"
+ON_RETRY_DELAYS="0 2"
+KEEP_OFF_INTERVAL=0
+DDC_OFF_VALUE="04"
+DDC_ON_VALUE="01"
+LOCK_ON_DISCONNECT=true
+TURN_ON_AFTER_DISCONNECT=true
+LOCK_ON_SERVICE_STOP=true
+TURN_ON_ON_SERVICE_STOP=true
+PORT_REFRESH_INTERVAL=10
+
+CURRENT_PORT=""
+LAST_PORT_REFRESH=0
+LAST_KEEP_OFF=0
+LAST_STATE="disconnected"
+SHUTTING_DOWN=false
+
+log() {
+    printf '%s %s\n' "$(date '+%F %T')" "$*"
+}
+
+warn() {
+    log "WARNING: $*" >&2
+}
+
+die() {
+    log "ERROR: $*" >&2
+    exit 1
+}
+
+is_true() {
+    case "${1,,}" in
+        1|true|yes|on) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+load_config() {
+    if [[ -r "$CONFIG_FILE" ]]; then
+        # shellcheck disable=SC1090
+        source "$CONFIG_FILE"
+    fi
+}
+
+require_command() {
+    command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
+}
+
+ensure_runtime_dir() {
+    mkdir -p "$RUNTIME_DIR"
+    chmod 0755 "$RUNTIME_DIR" 2>/dev/null || true
+}
+
+resolve_desktop_user() {
+    if [[ -n "$DESKTOP_USER" ]]; then
+        id "$DESKTOP_USER" >/dev/null 2>&1 || die "DESKTOP_USER does not exist: $DESKTOP_USER"
+        printf '%s\n' "$DESKTOP_USER"
+        return 0
+    fi
+
+    local sid user seat class type active
+    while read -r sid _; do
+        [[ -n "$sid" ]] || continue
+        user="$(loginctl show-session "$sid" -p Name --value 2>/dev/null || true)"
+        seat="$(loginctl show-session "$sid" -p Seat --value 2>/dev/null || true)"
+        class="$(loginctl show-session "$sid" -p Class --value 2>/dev/null || true)"
+        type="$(loginctl show-session "$sid" -p Type --value 2>/dev/null || true)"
+        active="$(loginctl show-session "$sid" -p Active --value 2>/dev/null || true)"
+
+        if [[ "$seat" == "seat0" && "$class" == "user" && "$active" == "yes" && ( "$type" == "wayland" || "$type" == "x11" ) ]]; then
+            printf '%s\n' "$user"
+            return 0
+        fi
+    done < <(loginctl list-sessions --no-legend 2>/dev/null || true)
+
+    return 1
+}
+
+find_graphical_session() {
+    local user="$1"
+    local sid name seat class type active fallback=""
+
+    while read -r sid _; do
+        [[ -n "$sid" ]] || continue
+        name="$(loginctl show-session "$sid" -p Name --value 2>/dev/null || true)"
+        [[ "$name" == "$user" ]] || continue
+
+        seat="$(loginctl show-session "$sid" -p Seat --value 2>/dev/null || true)"
+        class="$(loginctl show-session "$sid" -p Class --value 2>/dev/null || true)"
+        type="$(loginctl show-session "$sid" -p Type --value 2>/dev/null || true)"
+        active="$(loginctl show-session "$sid" -p Active --value 2>/dev/null || true)"
+
+        [[ "$class" == "user" ]] || continue
+        [[ "$type" == "wayland" || "$type" == "x11" ]] || continue
+
+        if [[ "$seat" == "seat0" && "$active" == "yes" ]]; then
+            printf '%s\n' "$sid"
+            return 0
+        fi
+        [[ -n "$fallback" ]] || fallback="$sid"
+    done < <(loginctl list-sessions --no-legend 2>/dev/null || true)
+
+    [[ -n "$fallback" ]] && printf '%s\n' "$fallback"
+}
+
+lock_desktop() {
+    local user sid
+    user="$(resolve_desktop_user)" || {
+        warn "could not determine desktop user; desktop was not locked"
+        return 1
+    }
+
+    sid="$(find_graphical_session "$user")"
+    if [[ -z "$sid" ]]; then
+        warn "no graphical session found for user $user"
+        return 1
+    fi
+
+    log "locking local GNOME session: $sid ($user)"
+    loginctl lock-session "$sid"
+}
+
+extract_port_from_endpoint() {
+    local endpoint="$1"
+    endpoint="${endpoint%\] }"
+    printf '%s\n' "${endpoint##*:}"
+}
+
+detect_user_rdp_port() {
+    local user uid pid line endpoint port
+    user="$(resolve_desktop_user)" || return 1
+    uid="$(id -u "$user")"
+
+    # Identify the user-level GNOME Remote Desktop daemon rather than the
+    # system-wide --system daemon used by Remote Login.
+    while read -r pid; do
+        [[ -n "$pid" ]] || continue
+
+        # Prefer the ordinary user Desktop Sharing service when multiple
+        # GNOME Remote Desktop modes are running for the same account.
+        if [[ -r "/proc/$pid/cgroup" ]] && ! grep -q 'gnome-remote-desktop.service' "/proc/$pid/cgroup"; then
+            continue
+        fi
+
+        while IFS= read -r line; do
+            [[ "$line" == *"pid=$pid,"* ]] || continue
+            endpoint="$(awk '{print $4}' <<<"$line")"
+            port="${endpoint##*:}"
+            if [[ "$port" =~ ^[0-9]+$ ]]; then
+                printf '%s\n' "$port"
+                return 0
+            fi
+        done < <(ss -Hlnpt 2>/dev/null || true)
+    done < <(pgrep -u "$uid" -f '/usr/libexec/gnome-remote-desktop-daemon([[:space:]]|$)' 2>/dev/null || true)
+
+    return 1
+}
+
+refresh_port() {
+    local now detected
+
+    if [[ "$RDP_PORT" != "auto" ]]; then
+        CURRENT_PORT="$RDP_PORT"
+        printf '%s\n' "$CURRENT_PORT" >"$PORT_CACHE_FILE" 2>/dev/null || true
+        return 0
+    fi
+
+    now="$(date +%s)"
+    if [[ -n "$CURRENT_PORT" && $((now - LAST_PORT_REFRESH)) -lt PORT_REFRESH_INTERVAL ]]; then
+        return 0
+    fi
+
+    detected="$(detect_user_rdp_port 2>/dev/null || true)"
+    LAST_PORT_REFRESH="$now"
+
+    if [[ "$detected" =~ ^[0-9]+$ ]]; then
+        if [[ "$CURRENT_PORT" != "$detected" ]]; then
+            CURRENT_PORT="$detected"
+            log "Desktop Sharing RDP port detected: $CURRENT_PORT"
+        fi
+        printf '%s\n' "$CURRENT_PORT" >"$PORT_CACHE_FILE" 2>/dev/null || true
+        return 0
+    fi
+
+    if [[ -z "$CURRENT_PORT" && -r "$PORT_CACHE_FILE" ]]; then
+        detected="$(cat "$PORT_CACHE_FILE" 2>/dev/null || true)"
+        [[ "$detected" =~ ^[0-9]+$ ]] && CURRENT_PORT="$detected"
+    fi
+
+    [[ -n "$CURRENT_PORT" ]]
+}
+
+is_connected() {
+    refresh_port || return 1
+    [[ -n "$CURRENT_PORT" ]] || return 1
+    ss -Htn state established "( sport = :${CURRENT_PORT} )" 2>/dev/null | grep -q .
+}
+
+detect_monitor_buses() {
+    ddcutil detect 2>/dev/null \
+        | sed -n 's#.*I2C bus:[[:space:]]*/dev/i2c-\([0-9][0-9]*\).*#\1#p' \
+        | awk '!seen[$0]++'
+}
+
+refresh_bus_cache() {
+    local buses
+
+    if [[ "$MONITOR_BUSES" != "auto" ]]; then
+        buses="$MONITOR_BUSES"
+    else
+        buses="$(detect_monitor_buses | xargs 2>/dev/null || true)"
+    fi
+
+    if [[ -z "$buses" ]]; then
+        warn "no DDC/CI monitor buses detected"
+        return 1
+    fi
+
+    printf '%s\n' "$buses" >"$BUS_CACHE_FILE"
+    printf '%s\n' "$buses"
+}
+
+get_cached_buses() {
+    local buses=""
+
+    if [[ "$MONITOR_BUSES" != "auto" ]]; then
+        printf '%s\n' "$MONITOR_BUSES"
+        return 0
+    fi
+
+    if [[ -r "$BUS_CACHE_FILE" ]]; then
+        buses="$(cat "$BUS_CACHE_FILE" 2>/dev/null || true)"
+    fi
+
+    if [[ -n "$buses" ]]; then
+        printf '%s\n' "$buses"
+        return 0
+    fi
+
+    refresh_bus_cache
+}
+
+set_monitor_value() {
+    local bus="$1" value="$2" label="$3"
+    ddcutil --bus "$bus" setvcp D6 "$value"
+    local rc=$?
+    log "$label bus=$bus rc=$rc"
+    return "$rc"
+}
+
+screen_off_once() {
+    local buses bus
+    buses="$(get_cached_buses)" || return 1
+
+    for bus in $buses; do
+        set_monitor_value "$bus" "$DDC_OFF_VALUE" "OFF" || true
+    done
+}
+
+screen_on_once() {
+    local buses bus
+    buses="$(get_cached_buses)" || return 1
+
+    for bus in $buses; do
+        set_monitor_value "$bus" "$DDC_ON_VALUE" "ON" || true
+    done
+}
+
+screen_off() {
+    local delay attempt=0
+
+    # Refresh while screens are still awake, then cache the buses. This is
+    # important for displays that stop responding to DDC after power-off.
+    refresh_bus_cache >/dev/null || true
+
+    log "RDP connected -> screens OFF"
+    for delay in $OFF_RETRY_DELAYS; do
+        attempt=$((attempt + 1))
+        (( delay > 0 )) && sleep "$delay"
+
+        if (( attempt > 1 )) && ! is_connected; then
+            log "RDP disconnected during OFF retry sequence; aborting retries"
+            return 0
+        fi
+
+        log "screens OFF attempt $attempt"
+        screen_off_once || true
+    done
+    LAST_KEEP_OFF="$(date +%s)"
+    log "screens OFF sequence completed"
+}
+
+screen_on() {
+    local delay attempt=0
+
+    log "screens ON"
+    for delay in $ON_RETRY_DELAYS; do
+        attempt=$((attempt + 1))
+        (( delay > 0 )) && sleep "$delay"
+        log "screens ON attempt $attempt"
+        screen_on_once || true
+    done
+    log "screens ON sequence completed"
+}
+
+secure_disconnect() {
+    log "RDP disconnected -> securing desktop"
+
+    if is_true "$LOCK_ON_DISCONNECT"; then
+        lock_desktop || true
+        sleep "$LOCK_SETTLE_DELAY"
+    fi
+
+    if is_true "$TURN_ON_AFTER_DISCONNECT"; then
+        screen_on
+    fi
+}
+
+cleanup() {
+    [[ "$SHUTTING_DOWN" == true ]] && return 0
+    SHUTTING_DOWN=true
+
+    log "service stopping"
+
+    # Only force the fail-safe lock/wake sequence when a remote session was
+    # active. Stopping the service during ordinary local use should not
+    # unexpectedly lock the user's desktop.
+    if [[ "$LAST_STATE" == "connected" ]] || is_connected; then
+        if is_true "$LOCK_ON_SERVICE_STOP"; then
+            lock_desktop || true
+            sleep "$LOCK_SETTLE_DELAY"
+        fi
+        if is_true "$TURN_ON_ON_SERVICE_STOP"; then
+            screen_on || true
+        fi
+    else
+        log "no active RDP session; no stop-time lock/wake action required"
+    fi
+}
+
+run_daemon() {
+    local now
+
+    require_command ss
+    require_command ddcutil
+    require_command loginctl
+    require_command pgrep
+    ensure_runtime_dir
+
+    # Warm caches while the local displays are likely still reachable.
+    refresh_bus_cache >/dev/null || true
+    refresh_port || true
+
+    trap 'cleanup; exit 0' SIGTERM SIGINT
+
+    log "$PROGRAM started"
+    if [[ -n "$CURRENT_PORT" ]]; then
+        log "watching Desktop Sharing TCP port $CURRENT_PORT"
+    else
+        log "waiting for user-level GNOME Remote Desktop listener"
+    fi
+    log "monitor buses: $(get_cached_buses 2>/dev/null || echo unknown)"
+
+    while true; do
+        if is_connected; then
+            if [[ "$LAST_STATE" != "connected" ]]; then
+                log "RDP connection detected on port $CURRENT_PORT"
+                screen_off
+                LAST_STATE="connected"
+            elif (( KEEP_OFF_INTERVAL > 0 )); then
+                now="$(date +%s)"
+                if (( now - LAST_KEEP_OFF >= KEEP_OFF_INTERVAL )); then
+                    log "periodic OFF enforcement"
+                    screen_off_once || true
+                    LAST_KEEP_OFF="$now"
+                fi
+            fi
+        else
+            if [[ "$LAST_STATE" == "connected" ]]; then
+                log "RDP connection lost; waiting ${DISCONNECT_DELAY}s for reconnect"
+                sleep "$DISCONNECT_DELAY"
+
+                if is_connected; then
+                    log "RDP reconnected -> keeping screens OFF"
+                    screen_off
+                    LAST_STATE="connected"
+                else
+                    log "disconnect confirmed"
+                    secure_disconnect
+                    LAST_STATE="disconnected"
+                fi
+            fi
+        fi
+
+        sleep "$CHECK_INTERVAL"
+    done
+}
+
+diagnose() {
+    local user port buses sid bus
+    ensure_runtime_dir
+
+    echo "== rdp-screen-privacy diagnostics =="
+    echo "Config: $CONFIG_FILE"
+    echo
+
+    echo "[OS]"
+    if [[ -r /etc/os-release ]]; then
+        grep -E '^(PRETTY_NAME|VERSION_ID)=' /etc/os-release || true
+    fi
+    command -v gnome-shell >/dev/null 2>&1 && gnome-shell --version || true
+    echo
+
+    echo "[Desktop user/session]"
+    user="$(resolve_desktop_user 2>/dev/null || true)"
+    echo "Desktop user: ${user:-not detected}"
+    if [[ -n "$user" ]]; then
+        sid="$(find_graphical_session "$user" 2>/dev/null || true)"
+        echo "Graphical session: ${sid:-not detected}"
+        [[ -n "$sid" ]] && loginctl show-session "$sid" -p Type -p State -p Active -p Remote -p Seat 2>/dev/null || true
+    fi
+    echo
+
+    echo "[GNOME Remote Desktop]"
+    port="$(detect_user_rdp_port 2>/dev/null || true)"
+    echo "Detected Desktop Sharing port: ${port:-not detected}"
+    ss -lntp 2>/dev/null | grep -E 'gnome-remote-de|:(3389|3390)\b' || true
+    echo
+
+    echo "[DDC/CI monitors]"
+    buses="$(detect_monitor_buses | xargs 2>/dev/null || true)"
+    echo "Detected buses: ${buses:-none}"
+    for bus in $buses; do
+        echo "-- bus $bus --"
+        ddcutil --bus "$bus" getvcp D6 2>&1 || true
+        ddcutil --bus "$bus" capabilities 2>/dev/null | grep -A4 -i 'Feature: D6' || true
+    done
+    echo
+
+    echo "[Optional locked-screen extension]"
+    if [[ -n "$user" ]] && command -v gnome-extensions >/dev/null 2>&1; then
+        # Querying another user's user bus is not always possible from root,
+        # so only attempt when diagnostics are run as that desktop user.
+        if [[ "$(id -un)" == "$user" ]]; then
+            gnome-extensions info allowlockedremotedesktop@kamens.us 2>/dev/null \
+                | grep -E '^(Name|Version|State):' || echo "Not installed or not queryable"
+        else
+            echo "Run diagnostics as $user to inspect GNOME extension state."
+        fi
+    else
+        echo "gnome-extensions not available"
+    fi
+}
+
+usage() {
+    cat <<EOF_USAGE
+Usage: $PROGRAM [command]
+
+Commands:
+  run          Run the connection watcher (default; used by systemd)
+  diagnose     Print GNOME RDP, session and DDC/CI diagnostics
+  off          Turn configured/detected monitors off
+  on           Turn configured/detected monitors on
+  lock         Lock the detected local graphical session
+  port         Print the detected Desktop Sharing RDP port
+  buses        Print configured/detected DDC/CI buses
+  version      Print program version
+  help         Show this help
+
+Environment:
+  RDP_SCREEN_PRIVACY_CONFIG=/path/to/config
+EOF_USAGE
+}
+
+main() {
+    local command="${1:-run}"
+    load_config
+    ensure_runtime_dir
+
+    case "$command" in
+        run)
+            run_daemon
+            ;;
+        diagnose)
+            diagnose
+            ;;
+        off)
+            require_command ddcutil
+            refresh_bus_cache >/dev/null || true
+            screen_off_once
+            ;;
+        on)
+            require_command ddcutil
+            screen_on_once
+            ;;
+        lock)
+            require_command loginctl
+            lock_desktop
+            ;;
+        port)
+            detect_user_rdp_port
+            ;;
+        buses)
+            require_command ddcutil
+            refresh_bus_cache
+            ;;
+        version|--version)
+            printf '%s %s\n' "$PROGRAM" "$VERSION"
+            ;;
+        help|-h|--help)
+            usage
+            ;;
+        *)
+            usage >&2
+            exit 2
+            ;;
+    esac
+}
+
+main "$@"

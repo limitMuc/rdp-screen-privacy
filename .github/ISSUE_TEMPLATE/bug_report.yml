@@ -1,0 +1,46 @@
+name: Bug report
+description: Report a reproducible problem with rdp-screen-privacy
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please do not include passwords, private network addresses, or sensitive logs.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Describe the expected and actual behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include OS, GNOME, Wayland/X11, GPU, monitor, cable/dock, and connection type.
+      placeholder: |
+        Ubuntu:
+        GNOME:
+        Session:
+        GPU:
+        Monitor(s):
+        Dock/adapter:
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics and logs
+      description: Run the commands below and redact sensitive information before posting.
+      render: text
+      value: |
+        sudo rdp-screen-privacy diagnose
+        sudo journalctl -u rdp-screen-privacy -n 100 --no-pager
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true

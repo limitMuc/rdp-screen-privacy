@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: MIT
+[Unit]
+Description=GNOME RDP physical screen privacy controller
+After=network.target systemd-logind.service
+Wants=systemd-logind.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/rdp-screen-privacy run
+Restart=always
+RestartSec=2
+
+# Runs as root because ddcutil commonly needs access to /dev/i2c-* and because
+# the service must be able to lock the local graphical session reliably.
+User=root
+Group=root
+
+# Conservative hardening that does not hide /dev/i2c-* or logind/netlink.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
